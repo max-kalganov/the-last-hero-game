@@ -1,20 +1,11 @@
-import math
 import os
 import pygame
 from pydualsense import pydualsense
 
+from utils import write_limited_rows
+
 ds = pydualsense()
 ds.init()
-
-_rows = []
-
-
-def write_row(text):
-    global _rows
-    _rows.append(str(text))
-    _rows = _rows[-10:]
-    os.system('clear')
-    print("\n".join(_rows))
 
 
 prev_gyro = [0., 0., 0.]
@@ -26,12 +17,12 @@ prev_acc = [0., 0., 0.]
 def check_by_change(prev_val, val, threshold, name, val_format):
     change = sum((pv - v) ** 2 for pv, v in zip(prev_val, val))
     if change > threshold:
-        write_row(f"{name}: change={change:.3f}, {val_format % tuple(val)}, prev_gyro=({val_format % tuple(prev_val)})")
+        write_limited_rows(f"{name}: change={change:.3f}, {val_format % tuple(val)}, prev_gyro=({val_format % tuple(prev_val)})")
 
 
 def bind_bool_event(event, name):
     def handler(state):
-        write_row(f"{name}: {'pressed' if state else 'released'}")
+        write_limited_rows(f"{name}: {'pressed' if state else 'released'}")
 
     event += handler
 
@@ -65,19 +56,19 @@ def on_accel(X, Y, Z):
 
 
 def on_l1(state):
-    write_row(f"L1: {'pressed' if state else 'released'}")
+    write_limited_rows(f"L1: {'pressed' if state else 'released'}")
 
 
 def on_l2(value):
-    write_row(f"L2 value: {value}")
+    write_limited_rows(f"L2 value: {value}")
 
 
 def on_r1(state):
-    write_row(f"R1: {'pressed' if state else 'released'}")
+    write_limited_rows(f"R1: {'pressed' if state else 'released'}")
 
 
 def on_r2(value):
-    write_row(f"R2 value: {value}")
+    write_limited_rows(f"R2 value: {value}")
 
 
 ds = pydualsense()
@@ -125,7 +116,6 @@ def check_controls():
     print("Move sticks, press buttons, tilt controller. Press PS to stop.")
 
     try:
-        _rows = []
         while not ds.state.ps:
             pass
     finally:
