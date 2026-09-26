@@ -1,5 +1,5 @@
 from pydualsense import pydualsense
-from utils import write_limited_rows
+from src.utils import write_limited_rows
 
 
 prev_gyro = [0., 0., 0.]

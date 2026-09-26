@@ -1,5 +1,5 @@
 import unittest
-from utils import get_limited_rows
+from src.utils import get_limited_rows
 
 
 class TestUtils(unittest.TestCase):
