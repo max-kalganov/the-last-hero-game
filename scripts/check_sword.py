@@ -1,5 +1,5 @@
 from spatium import Vec3
-from sword_mech.sword import Sword
+from src.core.sword import Sword
 
 
 def get_sword():
