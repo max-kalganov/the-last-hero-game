@@ -80,50 +80,59 @@ import pygame
 # MODULE: geometry (Vec3) -- uses your `spatium` lib if installed, otherwise
 # a minimal drop-in with the same operators your sword.py relies on.
 # --------------------------------------------------------------------------
-try:
-    import spatium as sp
-    Vec3 = sp.Vec3
-except ImportError:
-    class Vec3:
-        __slots__ = ("x", "y", "z")
+from spatium import Vec3
+# try:
+#     import spatium as sp
+#     Vec3 = sp.Vec3
+# except ImportError:
+#     print("\n\nError: Cant find Vec3\n\n")
+#     class Vec3:
+#         __slots__ = ("x", "y", "z")
+#
+#         def __init__(self, x: 'Vec3'|float|None=None, y: float|None=None, z: float|None=None):
+#             assert ((isinstance(x, type(self)) and y is None and z is None)
+#                     or (x is not None and y is not None and z is not None)), \
+#                 "incorrect input values for Vec3"
+#             if isinstance(x, type(self)) and y is None and z is None:
+#                 self.x, self.y, self.z = x.x, x.y, x.z
+#             self.x, self.y, self.z = x, y, z
+#
+#         def __add__(self, o):
+#             return Vec3(self.x + o.x, self.y + o.y, self.z + o.z)
+#
+#         def __sub__(self, o):
+#             return Vec3(self.x - o.x, self.y - o.y, self.z - o.z)
+#
+#         def __mul__(self, s):
+#             return Vec3(self.x * s, self.y * s, self.z * s)
+#
+#         __rmul__ = __mul__
+#
+#         def __or__(self, o):
+#             # matches sword.py's `self.base | self.tip` usage -> distance
+#             return self.length(o)
+#
+#         def length(self, o=None):
+#             d = self - o if o is not None else self
+#             return math.sqrt(d.x * d.x + d.y * d.y + d.z * d.z)
+#
+#         def normalized(self):
+#             l = self.length()
+#             if l < 1e-9:
+#                 return Vec3(0, 0, 0)
+#             return Vec3(self.x / l, self.y / l, self.z / l)
+#
+#         def dot(self, o):
+#             return self.x * o.x + self.y * o.y + self.z * o.z
+#
+#         def lerp(self, o, t):
+#             return self + (o - self) * t
+#
+#         def copy(self):
+#             return Vec3(self.x, self.y, self.z)
 
-        def __init__(self, x=0.0, y=0.0, z=0.0):
-            self.x, self.y, self.z = x, y, z
-
-        def __add__(self, o):
-            return Vec3(self.x + o.x, self.y + o.y, self.z + o.z)
-
-        def __sub__(self, o):
-            return Vec3(self.x - o.x, self.y - o.y, self.z - o.z)
-
-        def __mul__(self, s):
-            return Vec3(self.x * s, self.y * s, self.z * s)
-
-        __rmul__ = __mul__
-
-        def __or__(self, o):
-            # matches sword.py's `self.base | self.tip` usage -> distance
-            return self.length(o)
-
-        def length(self, o=None):
-            d = self - o if o is not None else self
-            return math.sqrt(d.x * d.x + d.y * d.y + d.z * d.z)
-
-        def normalized(self):
-            l = self.length()
-            if l < 1e-9:
-                return Vec3(0, 0, 0)
-            return Vec3(self.x / l, self.y / l, self.z / l)
-
-        def dot(self, o):
-            return self.x * o.x + self.y * o.y + self.z * o.z
-
-        def lerp(self, o, t):
-            return self + (o - self) * t
-
-        def copy(self):
-            return Vec3(self.x, self.y, self.z)
-
+def lerp(vec: Vec3, o: Vec3, t: float):
+    return vec + (o - vec) * t
 
 # --------------------------------------------------------------------------
 # MODULE: your Sword class, unmodified (pasted in so the file stays single).
@@ -272,7 +281,7 @@ class DualSenseBackend(GamepadBackend):
             r3=bool(s.R3),
             cross=bool(s.cross),
             circle=bool(s.circle),
-            gyro=(s.gyro.X, s.gyro.Y, s.gyro.Z),
+            gyro=(s.gyro.Pitch, s.gyro.Roll, s.gyro.Yaw),
             accel=(s.accelerometer.X, s.accelerometer.Y, s.accelerometer.Z),
             connected=True,
         )
@@ -280,6 +289,8 @@ class DualSenseBackend(GamepadBackend):
     @staticmethod
     def _axis(v):
         # pydualsense sticks are 0..255; recenter + normalize to [-1, 1]
+        if abs(v) < 10:
+            return 0
         return max(-1.0, min(1.0, (v - 128) / 127.0))
 
     def set_trigger_feedback(self, level: float):
@@ -362,7 +373,7 @@ class Gamepad:
         # integration (no drift correction) -- fine for a movement prototype.
         self.orientation_pitch = 0.0
         self.orientation_yaw = 0.0
-        self.gizmo_offset = GIZMO_ANCHOR_OFFSET.copy()
+        self.gizmo_offset = Vec3(GIZMO_ANCHOR_OFFSET)
 
     @staticmethod
     def _pick_backend():
@@ -388,7 +399,7 @@ class Gamepad:
             if self._l2_r2_hold_start is None:
                 self._l2_r2_hold_start = time.time()
             elif time.time() - self._l2_r2_hold_start >= RESET_HOLD_SECONDS:
-                self.gizmo_offset = GIZMO_ANCHOR_OFFSET.copy()
+                self.gizmo_offset = Vec3(GIZMO_ANCHOR_OFFSET)
                 self.just_reset = True
                 self._l2_r2_hold_start = None  # don't refire every frame
         else:
@@ -431,13 +442,13 @@ class SwordController:
         base = Vec3(0.0, 1.0, 0.0)
         tip = Vec3(0.0, 1.0, SWORD_LENGTH)
         self.sword = Sword(base, tip, GUARD_PROPORTION)
-        self.default_base = base.copy()
+        self.default_base = Vec3(base)
 
         self.state = SwingState.IDLE
         self.charge_start = None
         self.charge = 0.0                      # 0..1
         self.velocity = Vec3(0, 0, 0)
-        self.prev_tip = tip.copy()
+        self.prev_tip = Vec3(tip)
         self.acceleration = Vec3(0, 0, 0)
         self._prev_velocity = Vec3(0, 0, 0)
 
@@ -449,8 +460,8 @@ class SwordController:
         self.vertical_offset = 0.0
 
         self.swing_t = 0.0
-        self.swing_start_tip = tip.copy()
-        self.swing_target_tip = tip.copy()
+        self.swing_start_tip = Vec3(tip)
+        self.swing_target_tip = Vec3(tip)
         self.swing_power = 0.0
 
     # -- input handling -----------------------------------------------
@@ -494,7 +505,7 @@ class SwordController:
             return  # orientation is driven by the swing arc instead
         pitch, yaw = pad.orientation_pitch, pad.orientation_yaw
         direction = Vec3(math.sin(yaw), math.sin(pitch), math.cos(yaw) * math.cos(pitch))
-        self.sword.tip = self.sword.base + direction.normalized() * SWORD_LENGTH
+        self.sword.tip = self.sword.base + direction.normalized * SWORD_LENGTH
 
     def _handle_jump_crouch(self, dt, s: GamepadState):
         now = time.time()
@@ -538,10 +549,12 @@ class SwordController:
                 self.trajectory.clear()
             self.state = SwingState.CHARGING
             self.charge = min(1.0, (time.time() - self.charge_start) / MAX_CHARGE_TIME)
-            self._smoothed_dir = self._smoothed_dir.lerp(
-                (self.sword.tip - self.sword.base).normalized(), TRAJECTORY_SMOOTHING_ALPHA
+            self._smoothed_dir = lerp(
+                self._smoothed_dir,
+                (self.sword.tip - self.sword.base).normalized,
+                TRAJECTORY_SMOOTHING_ALPHA
             )
-            self.trajectory.append(self.sword.tip.copy())
+            self.trajectory.append(Vec3(self.sword.tip))
             pad.apply_trigger_feedback(self.charge)  # rising R2 resistance = "concentration"
 
         elif self.state == SwingState.CHARGING and s.r2 <= 0.5:
@@ -553,7 +566,7 @@ class SwordController:
             self.swing_t += dt / SWING_DURATION
             t = min(1.0, self.swing_t)
             eased = 1.0 - (1.0 - t) ** 3  # ease-out cubic: fast start, soft stop
-            self.sword.tip = self.swing_start_tip.lerp(self.swing_target_tip, eased)
+            self.sword.tip = lerp(self.swing_start_tip, self.swing_target_tip, eased)
             if t >= 1.0:
                 self.state = SwingState.IDLE
                 self.charge = 0.0
@@ -581,8 +594,8 @@ class SwordController:
         )
         self.state = SwingState.SWINGING
         self.swing_t = 0.0
-        self.swing_start_tip = self.sword.tip.copy()
-        self.swing_target_tip = self.sword.base + self._smoothed_dir.normalized() * (
+        self.swing_start_tip = Vec3(self.sword.tip)
+        self.swing_target_tip = self.sword.base + self._smoothed_dir.normalized * (
             SWORD_LENGTH * (1.0 + 0.3 * self.charge)
         )
 
@@ -593,13 +606,13 @@ class SwordController:
         self.acceleration = (new_velocity - self._prev_velocity) * (1.0 / dt)
         self._prev_velocity = self.velocity
         self.velocity = new_velocity
-        self.prev_tip = self.sword.tip.copy()
+        self.prev_tip = Vec3(self.sword.tip)
 
     def get_guard_forward_offset(self, s: GamepadState) -> Vec3:
         """While in GUARD, push the hilt forward along the blade axis."""
         if self.state != SwingState.GUARD:
             return Vec3(0, 0, 0)
-        forward = (self.sword.tip - self.sword.base).normalized()
+        forward = (self.sword.tip - self.sword.base).normalized
         return forward * GUARD_PUSH_FORWARD
 
 
@@ -649,19 +662,19 @@ class Camera:
     def update(self, dt, focus: Vec3):
         desired_pos = focus + Vec3(0.0, 0.55, -2.6)
         t = min(1.0, self.follow_lerp * dt)
-        self.pos = self.pos.lerp(desired_pos, t)
-        self.target = self.target.lerp(focus, t)
+        self.pos = lerp(self.pos, desired_pos, t)
+        self.target = lerp(self.target, focus, t)
 
     def project(self, p: Vec3):
         """Returns (screen_x, screen_y, depth) or None if behind the camera."""
         # Camera-space basis: forward = target-pos, simple world-up.
-        forward = (self.target - self.pos).normalized()
+        forward = (self.target - self.pos).normalized
         world_up = Vec3(0, 1, 0)
         right = Vec3(
             forward.y * world_up.z - forward.z * world_up.y,
             forward.z * world_up.x - forward.x * world_up.z,
             forward.x * world_up.y - forward.y * world_up.x,
-        ).normalized()
+        ).normalized
         up = Vec3(
             right.y * forward.z - right.z * forward.y,
             right.z * forward.x - right.x * forward.z,
@@ -669,9 +682,9 @@ class Camera:
         )
 
         rel = p - self.pos
-        cx = rel.dot(right)
-        cy = rel.dot(up)
-        cz = rel.dot(forward)
+        cx = rel @ right
+        cy = rel @ up
+        cz = rel @ forward
 
         if cz <= 0.05:
             return None  # behind / too close to camera
@@ -721,13 +734,13 @@ def draw_sword(surface, cam: Camera, sword: Sword, vertical_offset: float, guard
     # Perpendicular guard indicator: a short stick through guard_center,
     # perpendicular to the blade axis, drawn in the camera's local "right"
     # direction so it always reads as crossing the blade on screen.
-    axis = (tip - base).normalized()
+    axis = (tip - base).normalized
     arbitrary = Vec3(0, 1, 0) if abs(axis.y) < 0.9 else Vec3(1, 0, 0)
     guard_dir = Vec3(
         axis.y * arbitrary.z - axis.z * arbitrary.y,
         axis.z * arbitrary.x - axis.x * arbitrary.z,
         axis.x * arbitrary.y - axis.y * arbitrary.x,
-    ).normalized()
+    ).normalized
     half = 0.12
     draw_line3d(
         surface, cam,
@@ -760,13 +773,13 @@ def draw_gizmo(surface, cam: Camera, pos: Vec3, pitch: float, yaw: float):
     (No offline 3D asset library available here -- swap this for an actual
     controller mesh once you're in a real engine / have a model on disk.)
     """
-    forward = Vec3(math.sin(yaw), math.sin(pitch), math.cos(yaw) * math.cos(pitch)).normalized()
+    forward = Vec3(math.sin(yaw), math.sin(pitch), math.cos(yaw) * math.cos(pitch)).normalized
     up = Vec3(0, 1, 0)
     right = Vec3(
         forward.y * up.z - forward.z * up.y,
         forward.z * up.x - forward.x * up.z,
         forward.x * up.y - forward.y * up.x,
-    ).normalized()
+    ).normalized
 
     size = 0.12
     tip = pos + forward * (size * 1.6)
