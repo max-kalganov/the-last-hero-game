@@ -9,7 +9,8 @@ WHAT THIS IS
 
       - a floating sword controlled by stick position + controller
         orientation (gyro),
-      - a debug gamepad gizmo that mirrors the real controller in real time,
+      - a fixed top-right debug HUD that mirrors the real controller's
+        orientation in real time,
       - R2 charge/release swings, L2 guard stance, R3 recenter,
       - 3 difficulty modes that toggle how much feedback (trajectory /
         acceleration) is drawn on screen.
@@ -19,18 +20,20 @@ WHAT THIS IS
     later; Gamepad / Sword / Game classes don't know how they're drawn.
 
 CONTROLS
-    Left stick   - move sword BASE in world X/Z (ground plane)
-    Right stick  - move sword BASE in world Y (up/down)
+    Left stick   - move the sword's BASE along the ground plane, relative
+                   to where the camera is currently facing (forward/strafe,
+                   like movement in any third-person game)
+    Right stick  - orbit the camera around the sword (look around); pitch
+                   is clamped so the camera never dips below the horizon
     Gyro (tilt controller) - orients the BLADE (tip around base)
     R2 (hold)    - charge a strike, recording the drawn trajectory
     R2 (release) - execute the strike (power scales with charge)
     L2 (hold)    - guard stance (hilt pushes forward, blade goes defensive)
-    L2 + R2 (hold together 3s) - reset the DEBUG gizmo back to its anchor
     R3           - snap sword back to the default centered position
     Cross / X    - jump (temporary, auto-returns)
     Circle / O   - crouch (temporary, auto-returns)
     1 / 2 / 3    - difficulty: Easy / Medium / Hard
-    D            - toggle debug gizmo at runtime (in addition to --debug)
+    D            - toggle the debug gamepad readout (top-right corner)
     ESC          - quit
 
 RUN
@@ -40,18 +43,31 @@ RUN
 DEPENDENCIES
     pip install pygame
     pip install pydualsense      # optional, real DualSense gyro/triggers
-    pip install spatium          # optional, your own Vec3 lib -- a
-                                  # drop-in fallback is used if missing
+    pip install spatium          # required -- your Vec3 lib (hard import)
 
 NOTES FOR REVIEW (things I made a judgment call on -- flag if you disagree)
     - No real DualSense on hand / not connected -> falls back to a
       Keyboard+Mouse gamepad emulator so you can iterate without hardware.
       WASD = left stick, arrows = right stick, mouse move = gyro,
       LShift/RShift = L2/R2 (held, digital 0/1 not analog), Q = R3,
-      Z/X = Cross/Circle, hold LShift+RShift 3s = gizmo reset.
+      Z/X = Cross/Circle.
     - "spatium" usage from your sword.py is kept as the geometric core.
       I only added a thin `SwordController` around it for motion/state --
       I did not touch your Sword class's logic.
+    - The sword spinning in place was gyro-integration drift: raw angular
+      velocity was being summed every frame with no deadzone and no clamp
+      on yaw, so any sensor noise/bias accumulated into a permanent spin.
+      Fixed with a gyro deadzone + a "leaky integrator" that gently pulls
+      orientation back toward level when there's no real motion, plus a
+      yaw clamp symmetric with the existing pitch clamp. A proper fix
+      later would fuse gyro with the accelerometer (complementary/Kalman
+      filter, since gravity gives an absolute tilt reference) -- this is
+      a cheap approximation that's good enough for feel-testing.
+    - The debug gizmo is now a flat 2D readout fixed to the top-right
+      corner (yaw compass + pitch gauge), fully decoupled from the sword
+      and camera as you asked. That made the old "hold L2+R2 for 3s to
+      reset the gizmo anchor" feature meaningless (there's no anchor to
+      drift from anymore), so I removed it rather than leaving dead code.
     - Trigger "concentration" vibration: real adaptive-trigger ramping is
       attempted via pydualsense if present (see `_apply_trigger_feedback`),
       but since that can't be felt/verified without the pad, there's also
@@ -64,6 +80,10 @@ NOTES FOR REVIEW (things I made a judgment call on -- flag if you disagree)
       plus a short design note near `compute_swing_power`.
     - Jump/crouch + attack combos are stubbed (state + timers only) --
       wire real combo logic once basic movement feels right.
+    - Camera-relative movement means forward/back may come out inverted
+      depending on how your DualSense backend reports LY polarity -- if
+      "forward" on the stick feels backwards, flip the sign of `ly` in
+      `SwordController._handle_movement`.
 """
 
 import sys
@@ -142,7 +162,7 @@ class Sword:
     base: Vec3
     tip: Vec3
     len_to_guard_proportion: float  # len to len_to_guard_proportion from base
-    __sword_len: float = None
+    __sword_len: float | None = None
 
     def __init__(self, base: Vec3, tip: Vec3, len_to_guard_proportion: float):
         self.__check_sword(base, tip, len_to_guard_proportion)
@@ -193,8 +213,6 @@ GUARD_PUSH_FORWARD = 0.35     # how far the hilt/guard advances while in L2 stan
 TRAJECTORY_SMOOTHING_ALPHA = 0.35  # EMA factor: higher = snappier, lower = smoother
 TRAJECTORY_MAX_POINTS = 90
 
-RESET_HOLD_SECONDS = 3.0  # L2+R2 held together to reset the debug gizmo
-
 JUMP_DURATION = 0.35
 CROUCH_DURATION = 0.35
 JUMP_HEIGHT = 0.4
@@ -203,7 +221,27 @@ CROUCH_DROP = 0.25
 AUTO_RETURN_TO_CENTER = False   # per your note: probably keep this off
 AUTO_RETURN_SPEED = 1.5
 
-GIZMO_ANCHOR_OFFSET = Vec3(0.35, 0.25, -0.6)  # gizmo position relative to sword base
+# --- Gyro orientation (fixes the "sword spins in place" bug) --------------
+GYRO_SENSITIVITY = 0.02        # integration scale (unchanged from before)
+GYRO_DEADZONE = 4.0            # ignore gyro rate below this (sensor noise floor;
+                                # tune against your actual pydualsense readings)
+ORIENTATION_DRIFT_RECOVERY = 0.6   # per-second pull back toward level when idle
+ORIENTATION_LIMIT = 1.4        # symmetric clamp for BOTH pitch and yaw (rad,
+                                # ~80 degrees) -- matches the physical range you
+                                # can actually tilt a controller by hand
+
+# --- Camera orbit (right stick controls look, left stick moves relative
+#     to that look direction -- like a normal third-person game) ----------
+CAMERA_ROTATE_SPEED = 2.2      # rad/sec at full stick deflection
+CAMERA_DISTANCE = 2.6          # orbit radius around the sword
+CAMERA_PITCH_MIN = math.radians(2)    # never dips below the horizon
+CAMERA_PITCH_MAX = math.radians(80)   # near top-down looking at the sword
+CAMERA_PITCH_START = math.radians(20)
+CAMERA_FOLLOW_LERP = 4.0
+
+
+def apply_deadzone(v: float, dz: float = STICK_DEADZONE) -> float:
+    return 0.0 if abs(v) < dz else v
 
 COLORS = {
     "bg": (18, 18, 22),
@@ -271,9 +309,23 @@ class DualSenseBackend(GamepadBackend):
 
     def poll(self) -> GamepadState:
         s = self._ds.state
+
+        # Real Gyro (all values hover around 0 when stationary)
+        real_gyro = (
+            s.accelerometer.X,  # gyro X (~1 в покое)
+            s.accelerometer.Y,  # gyro Y (~-16)
+            s.accelerometer.Z,  # gyro Z (~5)
+        )
+
+        real_accel = (
+            s.gyro.Pitch,  # accel X (~20)
+            s.gyro.Yaw,  # accel Y (~7935, гравитация)
+            s.gyro.Roll,  # accel Z (~1413)
+        )
+
         return GamepadState(
-            left_stick=(self._axis(s.LX), self._axis(s.LY)),
-            right_stick=(self._axis(s.RX), self._axis(s.RY)),
+            left_stick=(self._axis(-s.LX), self._axis(-s.LY)),
+            right_stick=(self._axis(-s.RX), self._axis(s.RY)),
             l2=s.L2 / 255.0,
             r2=s.R2 / 255.0,
             l1=bool(s.L1),
@@ -281,17 +333,17 @@ class DualSenseBackend(GamepadBackend):
             r3=bool(s.R3),
             cross=bool(s.cross),
             circle=bool(s.circle),
-            gyro=(s.gyro.Pitch, s.gyro.Roll, s.gyro.Yaw),
-            accel=(s.accelerometer.X, s.accelerometer.Y, s.accelerometer.Z),
+            gyro=real_gyro,
+            accel=real_accel,
             connected=True,
         )
 
     @staticmethod
     def _axis(v):
-        # pydualsense sticks are 0..255; recenter + normalize to [-1, 1]
-        if abs(v) < 10:
+        # pydualsense sticks are -128..128; normalize to [-1, 1]
+        if abs(v) < 30:
             return 0
-        return max(-1.0, min(1.0, (v - 128) / 127.0))
+        return v / 128.0
 
     def set_trigger_feedback(self, level: float):
         # NOTE: exact adaptive-trigger call depends on your pydualsense
@@ -365,15 +417,12 @@ class Gamepad:
     def __init__(self):
         self.backend, self.using_hardware = self._pick_backend()
         self.state = GamepadState()
-        self._l2_r2_hold_start = None
-        self.just_reset = False
 
         # Integrated orientation (pitch, yaw) purely from gyro rate, used to
         # orient both the sword blade and the debug gizmo. This is a naive
         # integration (no drift correction) -- fine for a movement prototype.
         self.orientation_pitch = 0.0
         self.orientation_yaw = 0.0
-        self.gizmo_offset = Vec3(GIZMO_ANCHOR_OFFSET)
 
     @staticmethod
     def _pick_backend():
@@ -385,43 +434,37 @@ class Gamepad:
 
     def update(self, dt: float):
         self.state = self.backend.poll()
-        self.just_reset = False
 
         # Integrate gyro into an orientation usable for aiming the blade.
+        #
+        # BUG FIX ("sword spins in place"): this used to sum raw gyro rate
+        # every frame with no deadzone and no yaw clamp. Any sensor noise or
+        # bias -- which is never exactly zero at rest -- accumulated forever
+        # into a continuous, unbounded rotation. Three changes fix it:
+        #   1. Deadzone: ignore gyro rate below GYRO_DEADZONE so noise never
+        #      gets integrated in the first place.
+        #   2. Leaky integrator: multiply the accumulated orientation toward
+        #      zero every frame, so any residual drift decays back to level
+        #      instead of accumulating indefinitely. This is a cheap stand-in
+        #      for a real gyro+accelerometer fusion filter.
+        #   3. Clamp: yaw now has the same physical-range clamp pitch always
+        #      had, so even leftover drift can't spin past a fixed limit.
         gyro_pitch, gyro_yaw, _ = self.state.gyro
-        self.orientation_pitch += gyro_pitch * dt * 0.02
-        self.orientation_yaw += gyro_yaw * dt * 0.02
-        self.orientation_pitch = max(-1.4, min(1.4, self.orientation_pitch))
+        gyro_pitch = 0.0 if abs(gyro_pitch) < GYRO_DEADZONE else gyro_pitch
+        gyro_yaw = 0.0 if abs(gyro_yaw) < GYRO_DEADZONE else gyro_yaw
 
-        # L2 + R2 held together for RESET_HOLD_SECONDS -> reset gizmo anchor.
-        both_held = self.state.l2 > 0.5 and self.state.r2 > 0.5
-        if both_held:
-            if self._l2_r2_hold_start is None:
-                self._l2_r2_hold_start = time.time()
-            elif time.time() - self._l2_r2_hold_start >= RESET_HOLD_SECONDS:
-                self.gizmo_offset = Vec3(GIZMO_ANCHOR_OFFSET)
-                self.just_reset = True
-                self._l2_r2_hold_start = None  # don't refire every frame
-        else:
-            self._l2_r2_hold_start = None
+        self.orientation_pitch += gyro_pitch * dt * GYRO_SENSITIVITY
+        self.orientation_yaw += gyro_yaw * dt * GYRO_SENSITIVITY
 
-    def reset_hold_progress(self) -> float:
-        """0..1 progress toward the 3s reset hold, for an on-screen indicator."""
-        if self._l2_r2_hold_start is None:
-            return 0.0
-        return min(1.0, (time.time() - self._l2_r2_hold_start) / RESET_HOLD_SECONDS)
+        decay = max(0.0, 1.0 - ORIENTATION_DRIFT_RECOVERY * dt)
+        self.orientation_pitch *= decay
+        self.orientation_yaw *= decay
+
+        self.orientation_pitch = max(-ORIENTATION_LIMIT, min(ORIENTATION_LIMIT, self.orientation_pitch))
+        self.orientation_yaw = max(-ORIENTATION_LIMIT, min(ORIENTATION_LIMIT, self.orientation_yaw))
 
     def apply_trigger_feedback(self, level: float):
         self.backend.set_trigger_feedback(level)
-
-    def get_gizmo_pose(self, anchor: Vec3):
-        """Debug gizmo position/orientation. It's fixed at an offset behind
-        the sword (anchor-relative, NOT world-relative) so it never drifts
-        just because the player's laptop/camera doesn't move -- only the
-        controller's own rotation should visibly change it.
-        """
-        pos = anchor + self.gizmo_offset
-        return pos, self.orientation_pitch, self.orientation_yaw
 
     def close(self):
         self.backend.close()
@@ -465,22 +508,26 @@ class SwordController:
         self.swing_power = 0.0
 
     # -- input handling -----------------------------------------------
-    def update(self, dt: float, pad: Gamepad):
+    def update(self, dt: float, pad: Gamepad, camera: "Camera"):
         s = pad.state
-        self._handle_movement(dt, s)
+        self._handle_movement(dt, s, camera)
         self._handle_orientation(dt, pad)
         self._handle_jump_crouch(dt, s)
         self._handle_guard_and_swing(dt, s, pad)
         self._update_kinematics(dt)
 
     def _dz(self, v):
-        return 0.0 if abs(v) < STICK_DEADZONE else v
+        return apply_deadzone(v)
 
-    def _handle_movement(self, dt, s: GamepadState):
+    def _handle_movement(self, dt, s: GamepadState, camera: "Camera"):
+        # Left stick only, now camera-relative -- like movement in any
+        # normal third-person game. The right stick has moved entirely to
+        # camera look (handled in Game.run -> camera.handle_look_input).
         lx, ly = self._dz(s.left_stick[0]), self._dz(s.left_stick[1])
-        rx, ry = self._dz(s.right_stick[0]), self._dz(s.right_stick[1])
 
-        move = Vec3(lx, ry, ly) * (MOVE_SPEED * dt)
+        forward = camera.forward_flat()
+        right = camera.right_flat()
+        move = (right * lx + forward * ly) * (MOVE_SPEED * dt)
         # While actively swinging we don't let the stick fight the swing arc.
         if self.state != SwingState.SWINGING:
             self.sword.base = self.sword.base + move
@@ -649,19 +696,44 @@ class RefObject:
 
 
 class Camera:
-    """Simple third-person follow camera + perspective projection.
-    No matrix library needed -- explicit camera-space transform below.
+    """Third-person orbit camera + perspective projection. Right stick
+    orbits it around the sword (yaw free, pitch clamped so it never dips
+    below the horizon); left stick movement (in SwordController) is
+    expressed relative to this camera's facing direction, like movement in
+    any normal third-person game. No matrix library needed -- explicit
+    camera-space transform below.
     """
 
     def __init__(self):
+        self.yaw = 0.0
+        self.pitch = CAMERA_PITCH_START
         self.pos = Vec3(0.0, 1.6, -3.0)
         self.target = Vec3(0.0, 1.0, 0.0)
         self.fov = 70.0
-        self.follow_lerp = 4.0
+
+    def handle_look_input(self, dt, rx: float, ry: float):
+        self.yaw += rx * CAMERA_ROTATE_SPEED * dt
+        self.pitch += ry * CAMERA_ROTATE_SPEED * dt
+        self.pitch = max(CAMERA_PITCH_MIN, min(CAMERA_PITCH_MAX, self.pitch))
+
+    def forward_flat(self) -> Vec3:
+        """Horizontal (ground-plane) facing direction -- for left-stick
+        forward/back movement. Ignores pitch on purpose."""
+        return Vec3(math.sin(self.yaw), 0.0, math.cos(self.yaw))
+
+    def right_flat(self) -> Vec3:
+        """Horizontal strafe direction, perpendicular to forward_flat()."""
+        return Vec3(math.cos(self.yaw), 0.0, -math.sin(self.yaw))
 
     def update(self, dt, focus: Vec3):
-        desired_pos = focus + Vec3(0.0, 0.55, -2.6)
-        t = min(1.0, self.follow_lerp * dt)
+        horiz = CAMERA_DISTANCE * math.cos(self.pitch)
+        offset = Vec3(
+            -math.sin(self.yaw) * horiz,
+            CAMERA_DISTANCE * math.sin(self.pitch),
+            -math.cos(self.yaw) * horiz,
+        )
+        desired_pos = focus + offset
+        t = min(1.0, CAMERA_FOLLOW_LERP * dt)
         self.pos = lerp(self.pos, desired_pos, t)
         self.target = lerp(self.target, focus, t)
 
@@ -768,28 +840,33 @@ def draw_acceleration(surface, cam: Camera, tip: Vec3, accel: Vec3, difficulty: 
     draw_line3d(surface, cam, tip, end, COLORS["accel"], 3)
 
 
-def draw_gizmo(surface, cam: Camera, pos: Vec3, pitch: float, yaw: float):
-    """Stand-in for a 3D controller model: a small oriented cross/arrow.
-    (No offline 3D asset library available here -- swap this for an actual
-    controller mesh once you're in a real engine / have a model on disk.)
+def draw_gizmo_hud(surface, font, pitch: float, yaw: float):
+    """Debug readout of how the app currently interprets controller
+    orientation. Deliberately NOT drawn in world space -- it's a fixed 2D
+    widget pinned to the top-right corner, fully decoupled from the sword
+    and the camera, so it never moves/rotates/scales with either of them.
+        - left circle:  yaw, as a compass needle
+        - right gauge:  pitch, as a fill level
     """
-    forward = Vec3(math.sin(yaw), math.sin(pitch), math.cos(yaw) * math.cos(pitch)).normalized
-    up = Vec3(0, 1, 0)
-    right = Vec3(
-        forward.y * up.z - forward.z * up.y,
-        forward.z * up.x - forward.x * up.z,
-        forward.x * up.y - forward.y * up.x,
-    ).normalized
+    panel_x, panel_y = SCREEN_W - 180, 16
+    surface.blit(font.render("GAMEPAD DEBUG", True, COLORS["hud_dim"]), (panel_x, panel_y))
 
-    size = 0.12
-    tip = pos + forward * (size * 1.6)
-    left_wing = pos - forward * size * 0.3 + right * size
-    right_wing = pos - forward * size * 0.3 - right * size
+    # Yaw compass.
+    cx, cy, r = panel_x + 40, panel_y + 78, 34
+    pygame.draw.circle(surface, COLORS["hud_dim"], (cx, cy), r, 1)
+    needle_x = cx + math.sin(yaw) * r
+    needle_y = cy - math.cos(yaw) * r
+    pygame.draw.line(surface, COLORS["gizmo"], (cx, cy), (needle_x, needle_y), 3)
+    pygame.draw.circle(surface, COLORS["gizmo"], (cx, cy), 3)
+    surface.blit(font.render("yaw", True, COLORS["hud_dim"]), (cx - 12, cy + r + 4))
 
-    draw_line3d(surface, cam, pos, tip, COLORS["gizmo"], 2)
-    draw_line3d(surface, cam, tip, left_wing, COLORS["gizmo"], 2)
-    draw_line3d(surface, cam, tip, right_wing, COLORS["gizmo"], 2)
-    draw_point3d(surface, cam, pos, COLORS["gizmo"], 4)
+    # Pitch gauge.
+    gx, gy, gw, gh = panel_x + 110, panel_y + 44, 12, 68
+    pygame.draw.rect(surface, COLORS["hud_dim"], (gx, gy, gw, gh), 1)
+    fill_t = max(0.0, min(1.0, (pitch + ORIENTATION_LIMIT) / (2 * ORIENTATION_LIMIT)))
+    fill_h = int(gh * fill_t)
+    pygame.draw.rect(surface, COLORS["gizmo"], (gx, gy + gh - fill_h, gw, fill_h))
+    surface.blit(font.render("pitch", True, COLORS["hud_dim"]), (gx - 10, gy + gh + 4))
 
 
 def draw_hud(surface, font, ctl: SwordController, pad: Gamepad, difficulty: Difficulty, debug_on: bool):
@@ -809,15 +886,6 @@ def draw_hud(surface, font, ctl: SwordController, pad: Gamepad, difficulty: Diff
     bar_w, bar_h = 220, 14
     pygame.draw.rect(surface, COLORS["hud_dim"], (10, y + 4, bar_w, bar_h), 1)
     pygame.draw.rect(surface, COLORS["accel"], (10, y + 4, int(bar_w * ctl.charge), bar_h))
-
-    # Reset-hold progress (L2+R2 held together).
-    reset_progress = pad.reset_hold_progress()
-    if reset_progress > 0:
-        y2 = y + 26
-        pygame.draw.rect(surface, COLORS["hud_dim"], (10, y2, bar_w, bar_h), 1)
-        pygame.draw.rect(surface, COLORS["gizmo"], (10, y2, int(bar_w * reset_progress), bar_h))
-        surf = font.render("Resetting gizmo (hold L2+R2)...", True, COLORS["hud_dim"])
-        surface.blit(surf, (10 + bar_w + 10, y2 - 1))
 
 
 # --------------------------------------------------------------------------
@@ -854,7 +922,11 @@ class Game:
                 dt = self._apply_slowmo(dt)
                 self._handle_events()
                 self.pad.update(dt)
-                self.controller.update(dt, self.pad)
+
+                rx, ry = self.pad.state.right_stick
+                self.camera.handle_look_input(dt, apply_deadzone(rx), apply_deadzone(ry))
+
+                self.controller.update(dt, self.pad, self.camera)
                 self.camera.update(dt, self.controller.sword.base)
                 self._render()
         finally:
@@ -896,8 +968,7 @@ class Game:
         draw_acceleration(self.surface, self.camera, ctl.sword.tip, ctl.acceleration, self.difficulty)
 
         if self.debug_on:
-            pos, pitch, yaw = self.pad.get_gizmo_pose(ctl.sword.base)
-            draw_gizmo(self.surface, self.camera, pos, pitch, yaw)
+            draw_gizmo_hud(self.surface, self.font, self.pad.orientation_pitch, self.pad.orientation_yaw)
 
         draw_hud(self.surface, self.font, ctl, self.pad, self.difficulty, self.debug_on)
         pygame.display.flip()
